@@ -1,34 +1,59 @@
 # Vivaldi CLI
 
-Consulta local e somente leitura ao Vivaldi no macOS, sem Raycast, extensão ou serviço de rede. Usa apenas a biblioteca padrão do Python 3.10+.
+[Português (Brasil)](README.pt-BR.md)
 
-Projeto independente, sem afiliação com a Vivaldi Technologies.
+Read-only, local access to Vivaldi data on macOS. No Raycast, browser extension, network service, or third-party Python package is required. This is an independent project, not affiliated with Vivaldi Technologies. [MIT licensed](LICENSE).
 
-Licença: [MIT](LICENSE).
+## Install
 
-## Instalação
-
-No macOS, instale pelo tap do Homebrew:
+Install from the [Homebrew tap](https://github.com/matheuscoelhomalta/homebrew-vivaldi-cli):
 
 ```sh
 brew install matheuscoelhomalta/vivaldi-cli/vivaldi-cli
 vivaldi --version
 ```
 
-O Homebrew instala o Python necessário. Como alternativa, com Python 3.10+ execute `python3 vivaldi.py <comando>` diretamente deste diretório. Os exemplos abaixo usam o comando instalado `vivaldi`.
+Homebrew installs the required Python. Alternatively, with Python 3.10 or newer, run `python3 vivaldi.py <command>` from this repository. The examples below use the Homebrew-installed `vivaldi` command.
+
+To update or remove the Homebrew installation:
 
 ```sh
-vivaldi --version
+brew update
+brew upgrade matheuscoelhomalta/vivaldi-cli/vivaldi-cli
+brew uninstall matheuscoelhomalta/vivaldi-cli/vivaldi-cli
+```
+
+Run only the command you need. `brew uninstall` removes the CLI, not your Vivaldi profiles.
+
+## Commands
+
+```sh
 vivaldi profiles
-vivaldi history "termo" --profile Default --since 2026-09-01 --domain example.com
-vivaldi bookmarks "termo" --all-profiles
-vivaldi downloads "pdf" --since 2026-09-01
-vivaldi tabs "termo"
+vivaldi history "term" --profile Default --since 2026-01-01 --domain example.com
+vivaldi bookmarks "term" --all-profiles
+vivaldi downloads "pdf" --since 2026-01-01
+vivaldi tabs "term"
 vivaldi stats --all-profiles --top 20 --json
 ```
 
-Cada comando aceita `--json`; as listagens aceitam `--limit` (padrão 50, `0` para todos). Histórico, downloads e estatísticas aceitam `--since` e `--until` (datas locais, inclusivas); histórico, downloads e estatísticas aceitam `--domain`. Sem `--all-profiles`, a CLI usa `Default` ou o `--profile` informado. Com `--all-profiles`, histórico e downloads são ordenados por data antes de aplicar `--limit`. `--data-dir` permite apontar para outra pasta local de perfis. Consulte `vivaldi <comando> --help`.
+Every command supports `--json`. List commands support `--limit` (default: 50; `0` means all). History, downloads, and stats support inclusive local-date filters `--since` and `--until`; they also support an exact `--domain` filter. Without `--all-profiles`, the CLI uses `Default` or the profile selected with `--profile`. With `--all-profiles`, history and downloads are merged by date before `--limit` is applied. Use `--data-dir` for a different local Vivaldi data directory. Run `vivaldi <command> --help` for the full options.
 
-Histórico e downloads são lidos de uma cópia temporária do banco SQLite; o perfil original nunca é aberto para escrita. As abas são consultadas por Apple Events e exigem Vivaldi aberto e permissão de automação do macOS. A consulta de abas mostra as janelas da instância acessível ao AppleScript, sem atribuir um perfil a cada aba. Não há cache persistente, leitura de senhas/cookies ou comandos de edição. As estatísticas contam visitas registradas, **não** tempo de uso. Dados recentes podem não aparecer se o navegador ainda não os tiver gravado no banco; o período disponível depende da configuração de retenção e do Sync local.
+History and downloads are read from a temporary copy of Vivaldi's SQLite database. The original profile is never opened for writing. Tabs use macOS Apple Events: Vivaldi must be open, and macOS may ask you to allow the app running the CLI to control Vivaldi. Tab results cover windows accessible to AppleScript and do not identify a profile for each tab.
 
-Para testar sem acessar dados pessoais: `python3 -m unittest discover -s tests -v`. O CI executa esses testes sintéticos no macOS com Python 3.10 a 3.14; ele não acessa perfis reais.
+The CLI has no persistent cache and cannot read passwords or cookies or edit browser data. Stats count recorded visits, not time spent. Recent data may be absent until Vivaldi writes it to disk; available history depends on local retention and sync.
+
+## Troubleshooting
+
+- If Homebrew reports incompatible Apple Command Line Tools, update them through macOS Software Update or [Apple Developer Downloads](https://developer.apple.com/download/all/). Homebrew does not update Apple's tools.
+- If `vivaldi profiles` cannot find data, open Vivaldi once and check its profile directory, or pass `--data-dir`.
+- If `vivaldi tabs` fails, open Vivaldi and allow Apple Events access in macOS Privacy & Security → Automation for the app running the command.
+
+## Development
+
+Run synthetic tests without accessing personal profiles:
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+CI runs these tests on macOS with Python 3.10–3.14. It does not access real Vivaldi profiles.
