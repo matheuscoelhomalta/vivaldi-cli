@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 DEFAULT_DATA_DIR = Path.home() / "Library/Application Support/Vivaldi"
+VERSION = "0.1.0"
 
 
 class VivaldiError(Exception):
@@ -301,6 +302,7 @@ def show(rows, args: argparse.Namespace, kind: str) -> None:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="vivaldi", description="Consulta local e somente leitura ao Vivaldi")
+    root.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     sub = root.add_subparsers(dest="command", required=True)
 
     def common(command, *, profile=True, dates=False, domain=False, query=False, limit=True):

@@ -61,6 +61,12 @@ class VivaldiCLITest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout)
 
+    def test_version_does_not_need_a_profile(self):
+        result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "--version"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"vivaldi {vivaldi.VERSION}")
+
     def test_profiles_and_explicit_profile(self):
         self.assertEqual(len(self.run_cli("profiles")), 2)
         rows = self.run_cli("history", "example.com", "--profile", "Work")
@@ -75,6 +81,30 @@ class VivaldiCLITest(unittest.TestCase):
         summary = self.run_cli("stats", "--all-profiles")
         self.assertEqual(summary["visits"], 2)
         self.assertEqual(summary["top_domains"], [{"domain": "example.com", "visits": 2}])
+
+    def test_history_with_exclusive_source_lock(self):
+        connection = sqlite3.connect(self.data_dir / "Default" / "History")
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            self.assertEqual(len(self.run_cli("history", "Example")), 1)
+        finally:
+            connection.rollback()
+            connection.close()
+
+    def test_history_with_active_wal(self):
+        source = self.data_dir / "Default" / "History"
+        connection = sqlite3.connect(source)
+        try:
+            self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+            connection.execute("PRAGMA wal_autocheckpoint=0")
+            connection.execute("INSERT INTO urls VALUES (2, 'https://new.test/page', 'New Page', 1, 0)")
+            connection.execute("INSERT INTO visits VALUES (2, 2, 13300000002000000, 1000000)")
+            connection.commit()
+            self.assertTrue(source.with_name("History-wal").exists())
+            rows = self.run_cli("history", "new.test")
+            self.assertEqual([row["url"] for row in rows], ["https://new.test/page"])
+        finally:
+            connection.close()
 
     def test_bookmarks_exclude_trash_and_downloads(self):
         bookmarks = self.run_cli("bookmarks", "Bar")
