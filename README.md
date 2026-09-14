@@ -6,7 +6,16 @@ Projeto independente, sem afiliação com a Vivaldi Technologies.
 
 Licença: [MIT](LICENSE).
 
-Antes de haver um pacote publicado, execute diretamente com `python3 vivaldi.py <comando>` a partir deste diretório. Para disponibilizar o comando `vivaldi` no PATH, crie um link para `vivaldi.py` em um diretório do seu PATH, sem substituir um comando existente. Os exemplos abaixo usam esse nome de comando.
+## Instalação
+
+No macOS, instale pelo tap do Homebrew:
+
+```sh
+brew install matheuscoelhomalta/vivaldi-cli/vivaldi-cli
+vivaldi --version
+```
+
+O Homebrew instala o Python necessário. Como alternativa, com Python 3.10+ execute `python3 vivaldi.py <comando>` diretamente deste diretório. Os exemplos abaixo usam o comando instalado `vivaldi`.
 
 ```sh
 vivaldi --version
