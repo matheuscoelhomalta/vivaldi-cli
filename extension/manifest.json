@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Vivaldi CLI Bookmark Bridge",
+  "version": "0.1.0",
+  "description": "Local bookmark operations requested by Vivaldi CLI.",
+  "permissions": ["bookmarks", "nativeMessaging", "storage"],
+  "options_page": "options.html",
+  "background": {"service_worker": "service_worker.js"}
+}

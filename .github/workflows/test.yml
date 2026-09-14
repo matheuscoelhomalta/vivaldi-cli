@@ -22,3 +22,14 @@ jobs:
       - run: python -m unittest discover -s tests -v
         env:
           PYTHONDONTWRITEBYTECODE: '1'
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - run: node --test tests/test_extension.mjs
