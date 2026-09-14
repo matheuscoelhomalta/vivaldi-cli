@@ -120,7 +120,10 @@ class VivaldiCLITest(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Default\t", result.stdout)
-            self.assertIn("Profile 1\t", result.stdout)
+            if command[0] == "search":
+                self.assertIn("Profile 1,Default\t", result.stdout)
+            else:
+                self.assertIn("Profile 1\t", result.stdout)
             if command[0] == "bookmarks":
                 self.assertIn("Default\t10\tBar\tExample\t", result.stdout)
 
