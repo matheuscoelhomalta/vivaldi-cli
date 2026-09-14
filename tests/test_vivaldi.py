@@ -67,6 +67,18 @@ class VivaldiCLITest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), f"vivaldi {vivaldi.VERSION}")
 
+    def test_help_and_stats_text_are_english(self):
+        help_result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "--help"],
+                                     capture_output=True, text=True)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("Read-only local access to Vivaldi data", help_result.stdout)
+        self.assertIn("search bookmarks", help_result.stdout)
+
+        stats_result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "stats",
+                                       "--data-dir", str(self.data_dir)], capture_output=True, text=True)
+        self.assertEqual(stats_result.returncode, 0, stats_result.stderr)
+        self.assertIn("Visits: 1 | Unique URLs: 1", stats_result.stdout)
+
     def test_profiles_and_explicit_profile(self):
         self.assertEqual(len(self.run_cli("profiles")), 2)
         rows = self.run_cli("history", "example.com", "--profile", "Work")
@@ -122,7 +134,7 @@ class VivaldiCLITest(unittest.TestCase):
                    "--data-dir", str(self.data_dir)]
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Data fora do intervalo", result.stderr)
+        self.assertIn("Date is outside the supported range", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
         (self.data_dir / "Local State").write_text(json.dumps({
@@ -131,7 +143,7 @@ class VivaldiCLITest(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "profiles",
                                  "--data-dir", str(self.data_dir)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Não foi possível ler os perfis", result.stderr)
+        self.assertIn("Could not read profiles", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_tabs_parse_jxa_and_filter(self):

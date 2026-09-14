@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 DEFAULT_DATA_DIR = Path.home() / "Library/Application Support/Vivaldi"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 class VivaldiError(Exception):
@@ -49,14 +49,14 @@ def domain_of(url: str) -> str:
 def profiles(data_dir: Path) -> list[dict[str, str]]:
     state = data_dir / "Local State"
     if not state.is_file():
-        raise VivaldiError(f"Perfil do Vivaldi não encontrado: {data_dir}")
+        raise VivaldiError(f"Vivaldi profile not found: {data_dir}")
     try:
         cache = json.loads(state.read_text(encoding="utf-8"))["profile"]["info_cache"]
         if not isinstance(cache, dict) or any(not isinstance(item, dict) for item in cache.values()):
             raise ValueError("invalid profile cache")
         return [{"id": key, "name": value.get("name", key)} for key, value in cache.items()]
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise VivaldiError("Não foi possível ler os perfis em Local State") from exc
+        raise VivaldiError("Could not read profiles from Local State") from exc
 
 
 def selected_profiles(args: argparse.Namespace) -> list[dict[str, str]]:
@@ -67,14 +67,14 @@ def selected_profiles(args: argparse.Namespace) -> list[dict[str, str]]:
         if args.profile in (item["id"], item["name"]):
             return [item]
     names = ", ".join(item["id"] for item in available)
-    raise VivaldiError(f"Perfil '{args.profile}' não encontrado. IDs disponíveis: {names}")
+    raise VivaldiError(f"Profile '{args.profile}' not found. Available IDs: {names}")
 
 
 @contextmanager
 def history_connection(profile_dir: Path):
     source = profile_dir / "History"
     if not source.is_file():
-        raise VivaldiError(f"Histórico não encontrado no perfil: {profile_dir.name}")
+        raise VivaldiError(f"History not found for profile: {profile_dir.name}")
     # Vivaldi can hold an exclusive SQLite lock. Never connect for writes to its profile.
     with TemporaryDirectory(prefix="vivaldi-cli-") as temporary:
         copy = Path(temporary) / "History"
@@ -102,13 +102,13 @@ def date_bounds(args: argparse.Namespace) -> tuple[int | None, int | None]:
         start = date.fromisoformat(args.since) if args.since else None
         end = date.fromisoformat(args.until) if args.until else None
     except ValueError as exc:
-        raise VivaldiError("Datas devem estar no formato AAAA-MM-DD") from exc
+        raise VivaldiError("Dates must use YYYY-MM-DD format") from exc
     if start and end and start > end:
-        raise VivaldiError("--since deve ser anterior ou igual a --until")
+        raise VivaldiError("--since must be earlier than or equal to --until")
     try:
         return to_chromium(start) if start else None, to_chromium(end + timedelta(days=1)) if end else None
     except OverflowError as exc:
-        raise VivaldiError("Data fora do intervalo suportado") from exc
+        raise VivaldiError("Date is outside the supported range") from exc
 
 
 def matches(value: str, query: str | None) -> bool:
@@ -161,11 +161,11 @@ def bookmark_rows(args: argparse.Namespace):
     for profile in selected_profiles(args):
         path = args.data_dir / profile["id"] / "Bookmarks"
         if not path.is_file():
-            raise VivaldiError(f"Favoritos não encontrados no perfil: {profile['id']}")
+            raise VivaldiError(f"Bookmarks not found for profile: {profile['id']}")
         try:
             roots = json.loads(path.read_text(encoding="utf-8"))["roots"]
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise VivaldiError(f"Não foi possível ler favoritos do perfil: {profile['id']}") from exc
+            raise VivaldiError(f"Could not read bookmarks for profile: {profile['id']}") from exc
 
         def walk(node: dict, folder: tuple[str, ...]):
             if node.get("type") == "folder":
@@ -236,13 +236,13 @@ JSON.stringify(result);
 
 def tab_rows(args: argparse.Namespace):
     if sys.platform != "darwin":
-        raise VivaldiError("A consulta de abas requer macOS e Vivaldi aberto")
+        raise VivaldiError("Listing tabs requires macOS")
     try:
         output = subprocess.run(["osascript", "-l", "JavaScript", "-e", JXA_TABS],
                                 capture_output=True, text=True, check=True, timeout=25)
         rows = json.loads(output.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        raise VivaldiError("Não foi possível consultar as abas; verifique se o Vivaldi está aberto e permita Apple Events") from exc
+        raise VivaldiError("Could not list tabs; open Vivaldi and allow Apple Events access") from exc
     for row in rows:
         if matches(f"{row['title']} {row['url']}", args.query):
             row["domain"] = domain_of(row["url"])
@@ -272,7 +272,7 @@ def show(rows, args: argparse.Namespace, kind: str) -> None:
         if args.json:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
         else:
-            print(f"Visitas: {rows['visits']} | URLs distintas: {rows['unique_urls']}")
+            print(f"Visits: {rows['visits']} | Unique URLs: {rows['unique_urls']}")
             for item in rows["top_domains"]:
                 print(f"{item['visits']:>7}  {item['domain']}")
         return
@@ -301,45 +301,45 @@ def show(rows, args: argparse.Namespace, kind: str) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="vivaldi", description="Consulta local e somente leitura ao Vivaldi")
+    root = argparse.ArgumentParser(prog="vivaldi", description="Read-only local access to Vivaldi data")
     root.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     sub = root.add_subparsers(dest="command", required=True)
 
     def common(command, *, profile=True, dates=False, domain=False, query=False, limit=True):
         command.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR,
-                             help="pasta de dados do Vivaldi (padrão: perfil macOS)")
-        command.add_argument("--json", action="store_true", help="saída JSON para scripts")
+                             help="Vivaldi data directory (default: macOS profile directory)")
+        command.add_argument("--json", action="store_true", help="JSON output for scripts")
         if profile:
             selected = command.add_mutually_exclusive_group()
-            selected.add_argument("--profile", default="Default", help="ID ou nome do perfil")
-            selected.add_argument("--all-profiles", action="store_true", help="todos os perfis locais")
+            selected.add_argument("--profile", default="Default", help="profile ID or name")
+            selected.add_argument("--all-profiles", action="store_true", help="all local profiles")
         if query:
-            command.add_argument("query", nargs="?", help="termos em título, URL ou pasta")
+            command.add_argument("query", nargs="?", help="terms in title, URL, or folder")
         if dates:
-            command.add_argument("--since", help="data local inicial, AAAA-MM-DD")
-            command.add_argument("--until", help="data local final, AAAA-MM-DD (inclusiva)")
+            command.add_argument("--since", help="start date in local time, YYYY-MM-DD")
+            command.add_argument("--until", help="end date in local time, YYYY-MM-DD (inclusive)")
         if domain:
-            command.add_argument("--domain", help="domínio exato, sem www")
+            command.add_argument("--domain", help="exact domain, without www")
         if limit:
-            command.add_argument("--limit", type=int, default=50, help="máximo de resultados; 0 = todos")
+            command.add_argument("--limit", type=int, default=50, help="maximum results; 0 = all")
 
-    common(sub.add_parser("profiles", help="listar perfis"), profile=False, limit=False)
-    common(sub.add_parser("history", help="buscar visitas"), dates=True, domain=True, query=True)
-    common(sub.add_parser("bookmarks", help="buscar favoritos"), query=True)
-    common(sub.add_parser("downloads", help="buscar downloads"), dates=True, domain=True, query=True)
-    common(sub.add_parser("tabs", help="listar abas abertas"), profile=False, query=True)
-    stats_parser = sub.add_parser("stats", help="estatísticas do histórico disponível")
+    common(sub.add_parser("profiles", help="list profiles"), profile=False, limit=False)
+    common(sub.add_parser("history", help="search visits"), dates=True, domain=True, query=True)
+    common(sub.add_parser("bookmarks", help="search bookmarks"), query=True)
+    common(sub.add_parser("downloads", help="search downloads"), dates=True, domain=True, query=True)
+    common(sub.add_parser("tabs", help="list open tabs"), profile=False, query=True)
+    stats_parser = sub.add_parser("stats", help="statistics for available history")
     common(stats_parser, dates=True, domain=True, limit=False)
-    stats_parser.add_argument("--top", type=int, default=10, help="número de domínios no ranking")
+    stats_parser.add_argument("--top", type=int, default=10, help="number of top domains")
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if hasattr(args, "limit") and args.limit < 0:
-        raise SystemExit("--limit não pode ser negativo")
+        raise SystemExit("--limit cannot be negative")
     if hasattr(args, "top") and args.top < 0:
-        raise SystemExit("--top não pode ser negativo")
+        raise SystemExit("--top cannot be negative")
     try:
         commands = {"profiles": lambda: profiles(args.data_dir),
                     "history": lambda: history_rows(args),

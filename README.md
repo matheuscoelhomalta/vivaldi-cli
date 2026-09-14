@@ -1,7 +1,5 @@
 # Vivaldi CLI
 
-[Português (Brasil)](README.pt-BR.md)
-
 Read-only, local access to Vivaldi data on macOS. No Raycast, browser extension, network service, or third-party Python package is required. This is an independent project, not affiliated with Vivaldi Technologies. [MIT licensed](LICENSE).
 
 ## Install
