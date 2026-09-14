@@ -28,15 +28,16 @@ Run only the command you need. `brew uninstall` removes the CLI, not your Vivald
 ```sh
 vivaldi profiles
 vivaldi history "term" --profile Default --since 2026-01-01 --domain example.com
-vivaldi bookmarks "term" --all-profiles
+vivaldi bookmarks "term" --all-profiles --domain example.com
+vivaldi bookmarks --folder "Bookmarks Bar/Projects" --limit 0
 vivaldi downloads "pdf" --since 2026-01-01
-vivaldi tabs "term"
+vivaldi tabs "term" --domain example.com
 vivaldi stats --all-profiles --top 20 --json
 ```
 
-Every command supports `--json`. List commands support `--limit` (default: 50; `0` means all). History, downloads, and stats support inclusive local-date filters `--since` and `--until`; they also support an exact `--domain` filter. Without `--all-profiles`, the CLI uses `Default` or the profile selected with `--profile`. With `--all-profiles`, history and downloads are merged by date before `--limit` is applied. Use `--data-dir` for a different local Vivaldi data directory. Run `vivaldi <command> --help` for the full options.
+Every command supports `--json`. List commands support `--limit` (default: 50; `0` means all). History, downloads, and stats support inclusive local-date filters `--since` and `--until`. History, bookmarks, downloads, tabs, and stats support an exact `--domain` filter. Bookmarks also support `--folder`: match a full folder path, case-insensitively, including its subfolders. Without `--all-profiles`, the CLI uses `Default` or the profile selected with `--profile`. With `--all-profiles`, history and downloads are merged by date before `--limit` is applied. Use `--data-dir` for a different local Vivaldi data directory. Run `vivaldi <command> --help` for the full options.
 
-History and downloads are read from a temporary copy of Vivaldi's SQLite database. The original profile is never opened for writing. Tabs use macOS Apple Events: Vivaldi must be open, and macOS may ask you to allow the app running the CLI to control Vivaldi. Tab results cover windows accessible to AppleScript and do not identify a profile for each tab.
+History and downloads are read from a temporary SQLite snapshot. The CLI uses SQLite's backup API when available. If an exclusive lock prevents that, it copies the database and any journal files, then accepts the snapshot only if the source remained stable and SQLite's integrity check passes; otherwise it asks you to retry. The original profile is never opened for writing. Tabs use macOS Apple Events: Vivaldi must be open, and macOS may ask you to allow the app running the CLI to control Vivaldi. Tab results cover windows accessible to AppleScript and do not identify a profile for each tab.
 
 The CLI has no persistent cache and cannot read passwords or cookies or edit browser data. Stats count recorded visits, not time spent. Recent data may be absent until Vivaldi writes it to disk; available history depends on local retention and sync.
 
@@ -45,6 +46,7 @@ The CLI has no persistent cache and cannot read passwords or cookies or edit bro
 - If Homebrew reports incompatible Apple Command Line Tools, update them through macOS Software Update or [Apple Developer Downloads](https://developer.apple.com/download/all/). Homebrew does not update Apple's tools.
 - If `vivaldi profiles` cannot find data, open Vivaldi once and check its profile directory, or pass `--data-dir`.
 - If `vivaldi tabs` fails, open Vivaldi and allow Apple Events access in macOS Privacy & Security → Automation for the app running the command.
+- If history is locked or changes during a snapshot, retry when Vivaldi is idle.
 
 ## Development
 

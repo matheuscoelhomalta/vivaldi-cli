@@ -31,6 +31,9 @@ class VivaldiCLITest(unittest.TestCase):
                 "bookmark_bar": {"type": "folder", "name": "Bar", "children": [
                     {"type": "url", "name": "Example", "url": "https://example.com/page",
                      "date_added": "0"}]},
+                "other": {"type": "folder", "name": "Menu", "children": [
+                    {"type": "folder", "name": "Projects", "children": [
+                        {"type": "url", "name": "Other", "url": "https://other.test/page"}]}]},
                 "trash": {"type": "folder", "name": "Trash", "children": [
                     {"type": "url", "name": "Deleted", "url": "https://deleted.test"}]},
             }}), encoding="utf-8")
@@ -103,6 +106,34 @@ class VivaldiCLITest(unittest.TestCase):
             connection.rollback()
             connection.close()
 
+    def test_history_snapshot_excludes_uncommitted_write(self):
+        source = self.data_dir / "Default" / "History"
+        connection = sqlite3.connect(source)
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            connection.execute("INSERT INTO urls VALUES (2, 'https://pending.test', 'Pending', 1, 0)")
+            self.assertTrue(source.with_name("History-journal").exists())
+            result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "history", "--json",
+                                     "--data-dir", str(self.data_dir)], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([row["domain"] for row in json.loads(result.stdout)], ["example.com"])
+        finally:
+            connection.rollback()
+            connection.close()
+
+    def test_history_rejects_source_changed_during_fallback_copy(self):
+        source = self.data_dir / "Default" / "History"
+        original_copyfile = vivaldi.shutil.copyfile
+
+        def copy_and_change(original, destination):
+            original_copyfile(original, destination)
+            with source.open("ab") as handle:
+                handle.write(b"x")
+
+        with patch.object(vivaldi.shutil, "copyfile", side_effect=copy_and_change):
+            with self.assertRaisesRegex(vivaldi.VivaldiError, "stable History snapshot"):
+                vivaldi.copy_exclusively_locked_history(source, self.data_dir / "snapshot")
+
     def test_history_with_active_wal(self):
         source = self.data_dir / "Default" / "History"
         connection = sqlite3.connect(source)
@@ -115,6 +146,10 @@ class VivaldiCLITest(unittest.TestCase):
             self.assertTrue(source.with_name("History-wal").exists())
             rows = self.run_cli("history", "new.test")
             self.assertEqual([row["url"] for row in rows], ["https://new.test/page"])
+            with patch.object(vivaldi.shutil, "copyfile", side_effect=AssertionError("raw copy used")):
+                with vivaldi.history_connection(self.data_dir / "Default") as snapshot:
+                    self.assertEqual(snapshot.execute("PRAGMA quick_check").fetchone()[0], "ok")
+                    self.assertEqual(snapshot.execute("SELECT COUNT(*) FROM visits").fetchone()[0], 2)
         finally:
             connection.close()
 
@@ -124,6 +159,13 @@ class VivaldiCLITest(unittest.TestCase):
         self.assertEqual(bookmarks[0]["folder"], "Bar")
         self.assertIsNone(bookmarks[0]["added"])
         self.assertEqual(self.run_cli("bookmarks", "Deleted"), [])
+        self.assertEqual([row["domain"] for row in self.run_cli("bookmarks", "--domain", "www.example.com")],
+                         ["example.com"])
+        self.assertEqual([row["folder"] for row in self.run_cli("bookmarks", "--folder", "Menu")],
+                         ["Menu/Projects"])
+        self.assertEqual([row["domain"] for row in self.run_cli("bookmarks", "--folder", "menu/projects",
+                                                                   "--domain", "other.test")], ["other.test"])
+        self.assertEqual(self.run_cli("bookmarks", "--folder", "Projects"), [])
         downloads = self.run_cli("downloads", "report", "--domain", "example.com")
         self.assertEqual(downloads[0]["filename"], "report.pdf")
         self.assertEqual(downloads[0]["url"], "https://example.com/report.pdf")
@@ -146,11 +188,30 @@ class VivaldiCLITest(unittest.TestCase):
         self.assertIn("Could not read profiles", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_missing_profile_directory_suggests_recovery(self):
+        result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "profiles",
+                                 "--data-dir", str(self.data_dir / "missing")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("open Vivaldi once or use --data-dir", result.stderr)
+
     def test_tabs_parse_jxa_and_filter(self):
-        output = subprocess.CompletedProcess([], 0, stdout='[{"title":"Example","url":"https://example.com","window":1,"tab":1}]')
+        output = subprocess.CompletedProcess([], 0, stdout='[{"title":"Example","url":"https://example.com","window":1,"tab":1},'
+                                                          '{"title":"Other","url":"https://other.test","window":1,"tab":2}]')
         args = vivaldi.parser().parse_args(["tabs", "example.com"])
         with patch.object(vivaldi.subprocess, "run", return_value=output):
             self.assertEqual(list(vivaldi.tab_rows(args))[0]["domain"], "example.com")
+            filtered = vivaldi.parser().parse_args(["tabs", "--domain", "www.other.test"])
+            self.assertEqual([row["title"] for row in vivaldi.tab_rows(filtered)], ["Other"])
+
+    def test_tabs_report_permission_and_timeout(self):
+        args = vivaldi.parser().parse_args(["tabs"])
+        denied = subprocess.CalledProcessError(1, ["osascript"], stderr="Apple event error -1743")
+        with patch.object(vivaldi.subprocess, "run", side_effect=denied):
+            with self.assertRaisesRegex(vivaldi.VivaldiError, "Automation access denied"):
+                list(vivaldi.tab_rows(args))
+        with patch.object(vivaldi.subprocess, "run", side_effect=subprocess.TimeoutExpired(["osascript"], 25)):
+            with self.assertRaisesRegex(vivaldi.VivaldiError, "Timed out listing tabs"):
+                list(vivaldi.tab_rows(args))
 
 
 if __name__ == "__main__":
