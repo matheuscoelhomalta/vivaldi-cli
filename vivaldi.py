@@ -68,11 +68,12 @@ def selected_profiles(args: argparse.Namespace) -> list[dict[str, str]]:
     available = profiles(args.data_dir)
     if args.all_profiles:
         return available
+    requested = "Default" if args.profile is None else args.profile
     for item in available:
-        if args.profile in (item["id"], item["name"]):
+        if requested in (item["id"], item["name"]):
             return [item]
     names = ", ".join(item["id"] for item in available)
-    raise VivaldiError(f"Profile '{args.profile}' not found. Available IDs: {names}")
+    raise VivaldiError(f"Profile '{requested}' not found. Available IDs: {names}")
 
 
 @contextmanager
@@ -194,6 +195,11 @@ def history_rows(args: argparse.Namespace):
     def from_profile(profile):
         with history_connection(args.data_dir / profile["id"]) as db:
             conditions, params = [], []
+            if args.domain or getattr(args, "query", None):
+                db.create_function("cli_url_matches", 2, lambda url, title: int(
+                    matches_domain(domain_of(url), args.domain) and
+                    matches(f"{title or ''} {url}", getattr(args, "query", None))))
+                conditions.append("u.id IN (SELECT id FROM urls WHERE cli_url_matches(url, title))")
             if since is not None:
                 conditions.append("v.visit_time >= ?")
                 params.append(since)
@@ -208,10 +214,6 @@ def history_rows(args: argparse.Namespace):
             statement += " ORDER BY v.visit_time DESC"
             for url, title, visited, visits, typed, duration in db.execute(statement, params):
                 domain = domain_of(url)
-                if not matches_domain(domain, args.domain):
-                    continue
-                if not matches(f"{title or ''} {url}", getattr(args, "query", None)):
-                    continue
                 yield visited, {"profile": profile["id"], "title": title or "", "url": url,
                                 "domain": domain, "visited": iso_time(visited),
                                 "visit_count": visits, "typed_count": typed,
@@ -367,15 +369,16 @@ def stats(args: argparse.Namespace) -> dict:
             "by_day": dict(sorted(days.items())), "by_hour": dict(sorted(hours.items()))}
 
 
-def report_period(args: argparse.Namespace, start: date, end: date, *, audit: bool) -> dict:
+def report_period(args: argparse.Namespace, start: date, end: date, *, audit: bool,
+                  include_urls: bool = False) -> dict:
     period_args = argparse.Namespace(**vars(args), since=start.isoformat(), until=end.isoformat(),
                                      query=None, domain=None)
     domains, days, hours = Counter(), Counter(), Counter()
-    urls, durations = set(), []
+    urls, durations = Counter(), []
     missing = zero = invalid = visits = 0
     for row in history_rows(period_args):
         visits += 1
-        urls.add(row["url"])
+        urls[row["url"]] += 1
         if row["domain"]:
             domains[row["domain"]] += 1
         if row["visited"]:
@@ -401,6 +404,8 @@ def report_period(args: argparse.Namespace, start: date, end: date, *, audit: bo
                          for index in range(day_count)},
               "by_hour": {f"{hour:02d}": hours[f"{hour:02d}"] for hour in range(24)}}
     result["_domain_counts"] = domains
+    if include_urls:
+        result["_url_counts"] = urls
     if audit:
         ordered = sorted(durations)
         result["duration_quality"] = {
@@ -416,11 +421,16 @@ def report_period(args: argparse.Namespace, start: date, end: date, *, audit: bo
     return result
 
 
-def report(args: argparse.Namespace) -> dict:
+def comparison_dates(days: int) -> tuple[date, date, date, date]:
     today = date.today()
-    start = today - timedelta(days=args.days - 1)
+    start = today - timedelta(days=days - 1)
     previous_end = start - timedelta(days=1)
-    previous_start = previous_end - timedelta(days=args.days - 1)
+    previous_start = previous_end - timedelta(days=days - 1)
+    return today, start, previous_start, previous_end
+
+
+def report(args: argparse.Namespace) -> dict:
+    today, start, previous_start, previous_end = comparison_dates(args.days)
     current = report_period(args, start, today, audit=True)
     previous = report_period(args, previous_start, previous_end, audit=False)
     prior_domains = previous.pop("_domain_counts")
@@ -432,6 +442,60 @@ def report(args: argparse.Namespace) -> dict:
             "change": {"visits": current["visits"] - previous["visits"],
                        "unique_urls": current["unique_urls"] - previous["unique_urls"]},
             "today_incomplete": True}
+
+
+def insights(args: argparse.Namespace) -> dict:
+    today, start, previous_start, previous_end = comparison_dates(args.days)
+    current = report_period(args, start, today, audit=False, include_urls=True)
+    previous = report_period(args, previous_start, previous_end, audit=False, include_urls=True)
+    current_domains, previous_domains = current["_domain_counts"], previous["_domain_counts"]
+    current_urls = current["_url_counts"]
+    visits = current["visits"]
+
+    def share(count: int) -> float:
+        return round(count / visits * 100, 1) if visits else 0.0
+
+    new = sorted(((domain, count) for domain, count in current_domains.items()
+                  if domain not in previous_domains), key=lambda item: (-item[1], item[0]))
+    recurring = {domain: count for domain, count in current_domains.items()
+                 if domain in previous_domains}
+    changes = [{"domain": domain, "current_visits": current_domains[domain],
+                "previous_visits": previous_domains[domain],
+                "change": current_domains[domain] - previous_domains[domain]}
+               for domain in current_domains.keys() | previous_domains.keys()]
+    revisited = sorted(((url, count) for url, count in current_urls.items() if count > 1),
+                       key=lambda item: (-item[1], item[0]))
+    busy_days = sorted(((day, count) for day, count in current["by_day"].items() if count),
+                       key=lambda item: (-item[1], item[0]))
+    busy_hours = sorted(((hour, count) for hour, count in current["by_hour"].items() if count),
+                        key=lambda item: (-item[1], item[0]))
+    return {
+        "current": {key: current[key] for key in ("start", "end", "visits", "unique_urls")},
+        "previous": {key: previous[key] for key in ("start", "end", "visits", "unique_urls")},
+        "change": {"visits": visits - previous["visits"],
+                   "unique_urls": current["unique_urls"] - previous["unique_urls"]},
+        "domains": {
+            "new_vs_previous": {"count": len(new), "visits": sum(count for _, count in new),
+                                "top": [{"domain": domain, "visits": count}
+                                        for domain, count in new[:args.top]]},
+            "recurring": {"count": len(recurring), "visits": sum(recurring.values())},
+            "largest_increases": sorted((item for item in changes if item["change"] > 0),
+                                        key=lambda item: (-item["change"], item["domain"]))[:args.top],
+            "largest_decreases": sorted((item for item in changes if item["change"] < 0),
+                                        key=lambda item: (item["change"], item["domain"]))[:args.top]},
+        "revisits": {"urls_visited_multiple_times": len(revisited),
+                     "repeat_visits": sum(count - 1 for _, count in revisited),
+                     "top": [{"url": url, "visits": count} for url, count in revisited[:args.top]]},
+        "concentration": {
+            "active_days": len(busy_days),
+            "top_3_days_share_percent": share(sum(count for _, count in busy_days[:3])),
+            "top_3_hours_share_percent": share(sum(count for _, count in busy_hours[:3])),
+            "top_days": [{"date": day, "visits": count, "share_percent": share(count)}
+                         for day, count in busy_days[:args.top]],
+            "top_hours": [{"hour": hour, "visits": count, "share_percent": share(count)}
+                          for hour, count in busy_hours[:args.top]]},
+        "today_incomplete": True,
+        "note": "Counts are recorded visits, not active browsing time; available history may be incomplete."}
 
 
 def search(args: argparse.Namespace) -> list[dict]:
@@ -568,7 +632,7 @@ def show(rows, args: argparse.Namespace, kind: str) -> None:
             if rows["status"] == "preview":
                 print(f"No changes made. Run the same command with --apply {rows['token']}")
         return
-    if kind in ("stats", "report"):
+    if kind in ("stats", "report", "insights"):
         if args.json:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
         elif kind == "report":
@@ -581,6 +645,37 @@ def show(rows, args: argparse.Namespace, kind: str) -> None:
             print("By day:", json.dumps(current["by_day"], ensure_ascii=False))
             print("By hour:", json.dumps(current["by_hour"], ensure_ascii=False))
             print("Duration quality:", json.dumps(current["duration_quality"], ensure_ascii=False))
+        elif kind == "insights":
+            current, previous = rows["current"], rows["previous"]
+            print(f"Period: {current['start']} to {current['end']} "
+                  f"vs {previous['start']} to {previous['end']}")
+            print(f"Recorded visits: {current['visits']} ({rows['change']['visits']:+} vs previous {args.days} days)")
+            print(f"Distinct URLs: {current['unique_urls']} ({rows['change']['unique_urls']:+})")
+            new, recurring = rows["domains"]["new_vs_previous"], rows["domains"]["recurring"]
+            print(f"Domains absent from previous period: {new['count']} ({new['visits']} visits)")
+            print(f"Recurring domains: {recurring['count']} ({recurring['visits']} visits)")
+            for item in new["top"]:
+                print(f"  New: {item['domain']} ({item['visits']} visits)")
+            print("Largest domain increases:")
+            for item in rows["domains"]["largest_increases"]:
+                print(f"  {item['domain']}: {item['current_visits']} ({item['change']:+})")
+            print("Largest domain decreases:")
+            for item in rows["domains"]["largest_decreases"]:
+                print(f"  {item['domain']}: {item['current_visits']} ({item['change']:+})")
+            revisits = rows["revisits"]
+            print(f"Revisited URLs: {revisits['urls_visited_multiple_times']} "
+                  f"({revisits['repeat_visits']} visits after the first)")
+            for item in revisits["top"]:
+                print(f"  {item['visits']} visits  {item['url']}")
+            concentration = rows["concentration"]
+            print(f"Active days: {concentration['active_days']}; "
+                  f"top 3 days: {concentration['top_3_days_share_percent']}% of visits; "
+                  f"top 3 hours: {concentration['top_3_hours_share_percent']}% of visits")
+            for item in concentration["top_days"][:3]:
+                print(f"  Day: {item['date']} ({item['visits']} visits)")
+            for item in concentration["top_hours"][:3]:
+                print(f"  Hour: {item['hour']}:00 ({item['visits']} visits)")
+            print("Today is incomplete. Counts are visits, not active browsing time.")
         else:
             print(f"Visits: {rows['visits']} | Unique URLs: {rows['unique_urls']}")
             for item in rows["top_domains"]:
@@ -595,7 +690,11 @@ def show(rows, args: argparse.Namespace, kind: str) -> None:
                 title = next((match["title"] for match in row["matches"] if match["title"]), "")
                 location = row["url"] or next((match.get("path", "") for match in row["matches"]
                                                 if match.get("path")), "")
-                print(f"{sources}\t{title}\t{location}")
+                profile = ""
+                if args.all_profiles:
+                    profile = ",".join(dict.fromkeys(
+                        match["profile"] or "unattributed" for match in row["matches"])) + "\t"
+                print(f"{profile}{sources}\t{title}\t{location}")
         return
     if kind == "profiles":
         selected = rows
@@ -610,20 +709,21 @@ def show(rows, args: argparse.Namespace, kind: str) -> None:
         print(json.dumps(selected, ensure_ascii=False, indent=2))
     else:
         for row in selected:
+            profile = f"{row['profile']}\t" if getattr(args, "all_profiles", False) else ""
             if kind == "profiles":
                 print(f"{row['id']}\t{row['name']}")
             elif kind == "tabs":
                 print(f"{row['window']}:{row['tab']}\t{row['title']}\t{row['url']}")
             elif kind == "downloads":
-                print(f"{row['started']}\t{row['filename']}\t{row['url']}")
+                print(f"{profile}{row['started']}\t{row['filename']}\t{row['url']}")
             elif kind == "folders":
-                print(f"{row['id']}\t{row['path']}")
+                print(f"{profile}{row['id']}\t{row['path']}")
             else:
                 stamp = row.get("visited") or row.get("added") or ""
                 if kind == "bookmarks":
-                    print(f"{row['id']}\t{row['folder']}\t{row['title']}\t{row['url']}")
+                    print(f"{profile}{row['id']}\t{row['folder']}\t{row['title']}\t{row['url']}")
                 else:
-                    print(f"{stamp}\t{row['title']}\t{row['url']}")
+                    print(f"{profile}{stamp}\t{row['title']}\t{row['url']}")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -638,7 +738,8 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--json", action="store_true", help="JSON output for scripts")
         if profile:
             selected = command.add_mutually_exclusive_group()
-            selected.add_argument("--profile", default="Default", help="profile ID or name")
+            selected.add_argument("--profile", default=None,
+                                  help="profile ID or name (default: Default)")
             selected.add_argument("--all-profiles", action="store_true", help="all local profiles")
         if query:
             command.add_argument("query", nargs="?", help=query_help)
@@ -663,6 +764,11 @@ def parser() -> argparse.ArgumentParser:
     common(report_parser, limit=False)
     report_parser.add_argument("--days", type=int, default=30, help="calendar days per period (default: 30)")
     report_parser.add_argument("--top", type=int, default=10, help="number of top domains")
+    insights_parser = sub.add_parser("insights", help="find visit trends and revisited pages")
+    common(insights_parser, limit=False)
+    insights_parser.add_argument("--days", type=int, default=30,
+                                 help="calendar days per period (default: 30)")
+    insights_parser.add_argument("--top", type=int, default=10, help="maximum items per ranked list")
     search_parser = sub.add_parser("search", help="search across local Vivaldi data")
     common(search_parser)
     search_parser.add_argument("query", help="terms in title, URL, folder, or download path")
@@ -710,6 +816,12 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(args, "days") and not 1 <= args.days <= 3650:
         raise SystemExit("--days must be between 1 and 3650")
     try:
+        if (hasattr(args, "profile") and args.profile is None and
+                not args.all_profiles):
+            args.profile = "Default"
+            if len(profiles(args.data_dir)) > 1:
+                print("Using profile Default; pass --profile or --all-profiles to change scope",
+                      file=sys.stderr)
         if args.command == "bridge":
             if args.bridge_action == "setup":
                 chosen = selected_profiles(args)
@@ -735,6 +847,7 @@ def main(argv: list[str] | None = None) -> int:
                     "tabs": lambda: tab_rows(args),
                     "stats": lambda: stats(args),
                     "report": lambda: report(args),
+                    "insights": lambda: insights(args),
                     "search": lambda: search(args)}
         show(commands[args.command](), args, args.command)
         return 0

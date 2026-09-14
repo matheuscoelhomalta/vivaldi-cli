@@ -84,6 +84,7 @@ class VivaldiCLITest(unittest.TestCase):
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn("Read-only local access to Vivaldi data", help_result.stdout)
         self.assertIn("search bookmarks", help_result.stdout)
+        self.assertIn("insights", help_result.stdout)
 
         stats_result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "stats",
                                        "--data-dir", str(self.data_dir)], capture_output=True, text=True)
@@ -94,6 +95,42 @@ class VivaldiCLITest(unittest.TestCase):
         self.assertEqual(len(self.run_cli("profiles")), 2)
         rows = self.run_cli("history", "example.com", "--profile", "Work")
         self.assertEqual([row["profile"] for row in rows], ["Profile 1"])
+
+    def test_default_profile_is_visible_without_changing_json(self):
+        command = [sys.executable, str(SOURCE / "vivaldi.py"), "history", "example.com",
+                   "--data-dir", str(self.data_dir), "--json"]
+        implicit = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(implicit.returncode, 0, implicit.stderr)
+        self.assertEqual([row["profile"] for row in json.loads(implicit.stdout)], ["Default"])
+        self.assertIn("Using profile Default", implicit.stderr)
+        explicit = subprocess.run(command + ["--profile", "Default"],
+                                  capture_output=True, text=True)
+        self.assertEqual(explicit.returncode, 0, explicit.stderr)
+        self.assertEqual(explicit.stderr, "")
+        self.assertIn("default: Default", subprocess.run(
+            [sys.executable, str(SOURCE / "vivaldi.py"), "history", "--help"],
+            capture_output=True, text=True).stdout)
+
+    def test_all_profiles_text_identifies_origin_and_bookmark_folder(self):
+        for command in (("history", "example.com"), ("bookmarks", "Example"),
+                        ("downloads", "report.pdf"), ("bookmark", "folders"),
+                        ("search", "example.com")):
+            result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), *command,
+                                     "--all-profiles", "--data-dir", str(self.data_dir)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Default\t", result.stdout)
+            self.assertIn("Profile 1\t", result.stdout)
+            if command[0] == "bookmarks":
+                self.assertIn("Default\t10\tBar\tExample\t", result.stdout)
+
+    def test_history_filter_preserves_unicode_and_cross_field_matching(self):
+        with closing(sqlite3.connect(self.data_dir / "Default" / "History")) as db:
+            with db:
+                db.execute("INSERT INTO urls VALUES (2, 'https://other.test/straße', 'Coffee', 1, 0)")
+                db.execute("INSERT INTO visits VALUES (2, 2, 13300000000000001, 0)")
+        rows = self.run_cli("history", "COFFEE STRASSE", "--domain", "www.other.test")
+        self.assertEqual([row["url"] for row in rows], ["https://other.test/straße"])
 
     def test_history_filters_and_stats(self):
         rows = self.run_cli("history", "Example", "--all-profiles", "--domain", "example.com")
@@ -150,6 +187,66 @@ class VivaldiCLITest(unittest.TestCase):
         summary = self.run_cli("report", "--all-profiles")
         self.assertEqual(summary["current"]["visits"], 2)
         self.assertEqual(summary["current"]["unique_urls"], 1)
+
+    def test_insights_compares_domains_revisits_and_concentration(self):
+        today = date.today()
+
+        def visit_time(days_ago, hour):
+            local = datetime.combine(today - timedelta(days=days_ago), time(hour))
+            return int((local.astimezone(timezone.utc) - vivaldi.CHROMIUM_EPOCH).total_seconds() * 1_000_000)
+
+        with closing(sqlite3.connect(self.data_dir / "Default" / "History")) as db:
+            with db:
+                db.execute("INSERT INTO urls VALUES (2, 'https://new.test/page', 'New', 2, 0)")
+                db.execute("INSERT INTO urls VALUES (3, 'https://gone.test/page', 'Gone', 1, 0)")
+                for identifier, url_id, days_ago, hour in (
+                    (2, 1, 0, 9), (3, 1, 0, 10), (4, 1, 1, 9),
+                    (5, 2, 2, 14), (6, 2, 3, 18),
+                    (7, 1, 4, 9), (8, 3, 5, 17),
+                ):
+                    db.execute("INSERT INTO visits VALUES (?, ?, ?, 0)",
+                               (identifier, url_id, visit_time(days_ago, hour)))
+        result = self.run_cli("insights", "--days", "4")
+        self.assertEqual((result["current"]["visits"], result["previous"]["visits"]), (5, 2))
+        self.assertEqual(result["current"]["start"], (today - timedelta(days=3)).isoformat())
+        self.assertEqual(result["previous"]["end"], (today - timedelta(days=4)).isoformat())
+        self.assertEqual(result["change"], {"visits": 3, "unique_urls": 0})
+        self.assertEqual(result["domains"]["new_vs_previous"], {
+            "count": 1, "visits": 2, "top": [{"domain": "new.test", "visits": 2}]})
+        self.assertEqual(result["domains"]["recurring"], {"count": 1, "visits": 3})
+        self.assertEqual(result["domains"]["largest_decreases"][0]["domain"], "gone.test")
+        self.assertEqual(result["revisits"]["urls_visited_multiple_times"], 2)
+        self.assertEqual(result["revisits"]["repeat_visits"], 3)
+        self.assertEqual(result["revisits"]["top"][0],
+                         {"url": "https://example.com/page", "visits": 3})
+        self.assertEqual(result["concentration"]["active_days"], 4)
+        self.assertEqual(result["concentration"]["top_3_days_share_percent"], 80.0)
+        self.assertEqual(result["concentration"]["top_3_hours_share_percent"], 80.0)
+        self.assertTrue(result["today_incomplete"])
+        self.assertNotIn("hours_by_site", result)
+
+        with closing(sqlite3.connect(self.data_dir / "Profile 1" / "History")) as db:
+            with db:
+                db.execute("INSERT INTO visits VALUES (2, 1, ?, 0)", (visit_time(0, 11),))
+        all_profiles = self.run_cli("insights", "--days", "4", "--all-profiles", "--top", "0")
+        self.assertEqual(all_profiles["current"]["visits"], 6)
+        self.assertEqual(all_profiles["current"]["unique_urls"], 2)
+        self.assertEqual(all_profiles["revisits"]["repeat_visits"], 4)
+        self.assertEqual(all_profiles["revisits"]["top"], [])
+        self.assertEqual(all_profiles["domains"]["new_vs_previous"]["count"], 1)
+
+    def test_insights_empty_period_and_english_text(self):
+        empty = self.run_cli("insights", "--days", "1")
+        self.assertEqual(empty["current"]["visits"], 0)
+        self.assertEqual(empty["domains"]["new_vs_previous"]["count"], 0)
+        self.assertEqual(empty["revisits"]["repeat_visits"], 0)
+        self.assertEqual(empty["concentration"]["top_3_hours_share_percent"], 0.0)
+        text_result = subprocess.run([sys.executable, str(SOURCE / "vivaldi.py"), "insights",
+                                      "--days", "1", "--data-dir", str(self.data_dir)],
+                                     capture_output=True, text=True)
+        self.assertEqual(text_result.returncode, 0, text_result.stderr)
+        self.assertIn("Recorded visits: 0", text_result.stdout)
+        self.assertIn("not active browsing time", text_result.stdout)
 
     def test_search_deduplicates_exact_urls_and_handles_empty_results(self):
         rows = self.run_cli("search", "example", "--all-profiles", "--limit", "0")
